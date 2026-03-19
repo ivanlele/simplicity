@@ -189,13 +189,13 @@ rustJetTargetTy = rustJetTy "target_ty" (\(SomeArrow jet) -> unreflect (snd (rei
 
 rustJetPtr :: Module -> Doc a
 rustJetPtr mod = vsep $
-  [ nest 4 (vsep ("fn c_jet_ptr(&self) -> &dyn Fn(&mut CFrameItem, CFrameItem, &Self::CJetEnvironment) -> bool {" :
+  [ nest 4 (vsep ("fn c_jet_ptr(jet: &Self::Jet) -> fn(&mut CFrameItem, CFrameItem, &Self::CJetEnvironment) -> bool {" :
     if modname == "Bitcoin"
     then ["unimplemented!(\"Bitcoin jets have not yet been implemented.\")"]
-    else [ nest 4 (vsep ("match self {" :
+    else [ nest 4 (vsep ("match jet {" :
         map (<>comma)
         [ pretty modname <> "::" <> pretty (jetName jet) <+> "=>" <+>
-          pretty ("&simplicity_sys::c_jets::jets_wrapper::"++cJetName jet)
+          pretty ("simplicity_sys::c_jets::jets_wrapper::"++cJetName jet)
         | SomeArrow jet <- moduleJets mod
         ]))
     , "}"
@@ -250,38 +250,48 @@ rustJetImpl :: Module -> Doc a
 rustJetImpl mod = vsep $
   [ nest 4 (vsep $ punctuate line
     ["impl Jet for" <+> pretty modname <+> "{"
-    , env
     , rustJetCmr mod
     , rustJetSourceTy mod
     , rustJetTargetTy mod
     , rustJetEncode mod
     , rustJetDecode mod
-    , rustJetPtr mod
     , rustJetCost mod
     ])
   , "}"
   ]
  where
   modname = rustModuleName mod
-  env = vsep
-    [ pretty $ "type Environment = "++env++";"
-    , pretty $ "type CJetEnvironment = "++cEnv++";"
-    , ""
-    , pretty $ "fn c_jet_env("++envArg++": &Self::Environment) -> &Self::CJetEnvironment {"
-    , pretty $ "    "++envBody
-    , "}"
-    ]
-   where
-    env | Nothing <- moduleName mod = "()"
-        | Just "Elements" == moduleName mod = "ElementsEnv<std::sync::Arc<elements::Transaction>>"
-        | Just name <- moduleName mod = name ++ "Env"
-    cEnv | Just "Elements" == moduleName mod = "CElementsTxEnv"
-         | otherwise = "()"
-    envArg | Just "Bitcoin" == moduleName mod = "_env"
-           | otherwise = "env"
-    envBody | Nothing == moduleName mod = "env"
-            | Just "Bitcoin" == moduleName mod = "unimplemented!(\"Unspecified CJetEnvironment for Bitcoin jets\")"
-            | otherwise = "env.c_tx_env()"
+
+rustJetEnvImpl :: Module -> Doc a
+rustJetEnvImpl mod = vsep $
+  typeAlias ++
+  [ nest 4 (vsep $ punctuate line
+    ["impl JetEnvironment for" <+> pretty envTypeName <+> "{"
+    , vsep
+      [ "type Jet =" <+> pretty modname <> semi
+      , "type CJetEnvironment =" <+> pretty cJetEnvType <> semi
+      ]
+    , vsep
+      [ "fn c_jet_env(&self) -> &Self::CJetEnvironment {"
+      , "    " <> pretty cJetEnvBody
+      , "}"
+      ]
+    , rustJetPtr mod
+    ])
+  , "}"
+  ]
+ where
+  modname = rustModuleName mod
+  envTypeName | Nothing <- moduleName mod = "CoreEnv"
+              | Just "Elements" == moduleName mod = "ElementsTxEnv"
+              | Just name <- moduleName mod = name ++ "Env"
+  typeAlias | Nothing <- moduleName mod = ["pub type CoreEnv = ();" , mempty]
+            | Just "Elements" == moduleName mod = ["pub type ElementsTxEnv = ElementsEnv<std::sync::Arc<elements::Transaction>>;" , mempty]
+            | otherwise = []
+  cJetEnvType | Just "Elements" == moduleName mod = "CElementsTxEnv" :: String
+              | otherwise = "()"
+  cJetEnvBody | Just "Elements" == moduleName mod = "self.c_tx_env()" :: String
+              | otherwise = "&()"
 
 rustJetEnum :: Module -> Doc a
 rustJetEnum mod = vsep
@@ -343,7 +353,7 @@ rustHeader = "/* This file has been automatically generated. */"
 rustImports :: Module -> Doc a
 rustImports mod = vsep (map (<> semi)
   ([ "use crate::jet::type_name::TypeName"
-  , "use crate::jet::Jet"
+  , "use crate::jet::{Jet, JetEnvironment}"
   , "use crate::merkle::cmr::Cmr"
   , "use crate::decode_bits"
   , "use crate::{decode, BitIter, BitWriter}"
@@ -369,6 +379,7 @@ rustJetDoc mod = layoutPretty layoutOptions $ vsep (map (<> line)
   , rustJetImpl mod
   , rustJetDisplay mod
   , rustJetFromStr mod
+  , rustJetEnvImpl mod
   ])
 
 rustFFIImports :: Doc a
